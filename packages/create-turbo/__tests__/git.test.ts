@@ -243,4 +243,43 @@ describe("git", () => {
       mockExecSync.mockRestore();
     });
   });
+
+  describe("turbo prune", () => {
+    const { useFixture } = setupTestFixtures({
+      directory: path.join(__dirname, "../"),
+      options: { emptyFixture: true },
+    });
+
+    it("respects ignore files during prune process", async () => {
+      const { root } = useFixture({ fixture: `git` });
+      const mockExecSync = jest
+        .spyOn(childProcess, "execSync")
+        .mockImplementationOnce(() => {
+          throw new Error(
+            "fatal: not a git repository (or any of the parent directories): .git"
+          );
+        })
+        .mockImplementationOnce(() => {
+          throw new Error("abort: no repository found (.hg not found)");
+        })
+        .mockReturnValue("success");
+
+      const result = tryGitInit(root, "test commit");
+      expect(result).toBe(true);
+
+      const calls = [
+        "git init",
+        "git checkout -b main",
+        "git add -A",
+        'git commit --author="Turbobot <turbobot@vercel.com>" -am "test commit"',
+      ];
+      expect(mockExecSync).toHaveBeenCalledTimes(calls.length + 2);
+      calls.forEach((call) => {
+        expect(mockExecSync).toHaveBeenCalledWith(call, {
+          stdio: "ignore",
+        });
+      });
+      mockExecSync.mockRestore();
+    });
+  });
 });

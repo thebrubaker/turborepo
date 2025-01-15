@@ -45,6 +45,23 @@ pub fn ensure_turbo_is_gitignored(repo_root: &AbsoluteSystemPath) -> Result<(), 
     Ok(())
 }
 
+pub fn is_ignored(path: &AbsoluteSystemPath, ignore_files: &[String]) -> Result<bool, io::Error> {
+    for ignore_file in ignore_files {
+        let ignore_file_path = path.parent().unwrap().join(ignore_file);
+        if ignore_file_path.exists() {
+            let file = File::open(ignore_file_path)?;
+            let reader = io::BufReader::new(file);
+            for line in reader.lines() {
+                let line = line?;
+                if line.trim() == path.file_name().unwrap().to_str().unwrap() {
+                    return Ok(true);
+                }
+            }
+        }
+    }
+    Ok(false)
+}
+
 #[cfg(test)]
 mod tests {
     use anyhow::Result;

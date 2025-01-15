@@ -17,6 +17,7 @@ use turborepo_ui::BOLD;
 
 use super::CommandBase;
 use crate::turbo_json::RawTurboJson;
+use crate::gitignore::is_ignored;
 
 pub const DEFAULT_OUTPUT_DIR: &str = "out";
 
@@ -94,11 +95,12 @@ pub async fn prune(
     docker: bool,
     output_dir: &str,
     telemetry: CommandEventBuilder,
+    ignore_files: Option<Vec<String>>,
 ) -> Result<(), Error> {
     telemetry.track_arg_usage("docker", docker);
     telemetry.track_arg_usage("out-dir", output_dir != DEFAULT_OUTPUT_DIR);
 
-    let prune = Prune::new(base, scope, docker, output_dir, telemetry).await?;
+    let prune = Prune::new(base, scope, docker, output_dir, telemetry, ignore_files).await?;
 
     if matches!(
         prune.package_graph.package_manager(),
@@ -244,6 +246,7 @@ struct Prune<'a> {
     full_directory: AbsoluteSystemPathBuf,
     docker: bool,
     scope: &'a [String],
+    ignore_files: Vec<String>,
 }
 
 #[derive(Copy, Clone, PartialEq, Eq)]
@@ -262,6 +265,7 @@ impl<'a> Prune<'a> {
         docker: bool,
         output_dir: &str,
         telemetry: CommandEventBuilder,
+        ignore_files: Option<Vec<String>>,
     ) -> Result<Self, Error> {
         let allow_missing_package_manager = base.opts().repo_opts.allow_no_package_manager;
         telemetry.track_arg_usage(
@@ -320,6 +324,8 @@ impl<'a> Prune<'a> {
                 .ensure_dir()?;
         }
 
+        let ignore_files = ignore_files.unwrap_or_else(|| vec![".gitignore".to_string()]);
+
         Ok(Self {
             package_graph,
             root: base.repo_root.clone(),
@@ -327,6 +333,7 @@ impl<'a> Prune<'a> {
             full_directory,
             docker,
             scope,
+            ignore_files,
         })
     }
 
@@ -342,6 +349,10 @@ impl<'a> Prune<'a> {
         let from_path = self.root.resolve(path);
         if !from_path.try_exists()? {
             trace!("{from_path} doesn't exist, skipping copying");
+            return Ok(());
+        }
+        if is_ignored(&from_path, &self.ignore_files)? {
+            trace!("{from_path} is ignored, skipping copying");
             return Ok(());
         }
         let full_to = self.full_directory.resolve(path);
@@ -370,6 +381,10 @@ impl<'a> Prune<'a> {
         let from_path = self.root.resolve(path);
         if !from_path.try_exists()? {
             trace!("{from_path} doesn't exist, skipping copying");
+            return Ok(());
+        }
+        if is_ignored(&from_path, &self.ignore_files)? {
+            trace!("{from_path} is ignored, skipping copying");
             return Ok(());
         }
         let full_to = self.full_directory.resolve(path);
