@@ -95,11 +95,14 @@ pub async fn prune(
     output_dir: &str,
     telemetry: CommandEventBuilder,
 ) -> Result<(), Error> {
+    // Track usage of docker and custom output dir flags for analytics
     telemetry.track_arg_usage("docker", docker);
     telemetry.track_arg_usage("out-dir", output_dir != DEFAULT_OUTPUT_DIR);
 
+    // Initialize prune struct with base config, scope, and output settings
     let prune = Prune::new(base, scope, docker, output_dir, telemetry).await?;
 
+    // Bun package manager is not supported for prune command
     if matches!(
         prune.package_graph.package_manager(),
         turborepo_repository::package_manager::PackageManager::Bun
@@ -107,12 +110,14 @@ pub async fn prune(
         return Err(Error::BunUnsupported);
     }
 
+    // Print status message showing what workspaces we're pruning and where
     println!(
         "Generating pruned monorepo for {} in {}",
         base.color_config.apply(BOLD.apply_to(scope.join(", "))),
         base.color_config.apply(BOLD.apply_to(&prune.out_directory)),
     );
 
+    // Copy workspace config file (like pnpm-workspace.yaml) if it exists
     if let Some(workspace_config_path) = prune
         .package_graph
         .package_manager()
@@ -124,22 +129,29 @@ pub async fn prune(
         )?;
     }
 
+    // Track workspace paths and names for copying files and generating lockfile
     let mut workspace_paths = Vec::new();
     let mut workspace_names = Vec::new();
+
+    // Get all internal dependencies for the specified workspaces
     let workspaces = prune.internal_dependencies();
+
+    // Get all external dependencies needed by the internal workspaces
     let lockfile_keys: Vec<_> = prune
         .package_graph
         .transitive_external_dependencies(workspaces.iter())
         .into_iter()
         .map(|pkg| pkg.key.clone())
         .collect();
+
+    // Process each workspace - copy files and collect metadata
     for workspace in workspaces {
         let entry = prune
             .package_graph
             .package_info(&workspace)
             .ok_or_else(|| Error::MissingWorkspace(workspace.clone()))?;
 
-        // We don't want to do any copying for the root workspace
+        // Skip root workspace, only copy package workspaces
         if let PackageName::Other(workspace) = workspace {
             prune.copy_workspace(entry.package_json_path())?;
             workspace_paths.push(
@@ -158,12 +170,14 @@ pub async fn prune(
     trace!("new workspaces: {}", workspace_paths.join(", "));
     trace!("lockfile keys: {}", lockfile_keys.join(", "));
 
+    // Generate pruned lockfile with only required dependencies
     let lockfile = prune
         .package_graph
         .lockfile()
         .expect("Lockfile presence already checked")
         .subgraph(&workspace_paths, &lockfile_keys)?;
 
+    // Write lockfile to output directory and docker directory if needed
     let lockfile_contents = lockfile.encode()?;
     let lockfile_name = prune.package_graph.package_manager().lockfile_name();
     let lockfile_path = prune.out_directory.join_component(lockfile_name);
@@ -175,18 +189,22 @@ pub async fn prune(
             .create_with_contents(&lockfile_contents)?;
     }
 
+    // Copy additional config files needed for installation
     for (relative_path, required_for_install) in ADDITIONAL_FILES.as_slice() {
         let path = relative_path.to_anchored_system_path_buf();
         prune.copy_file(&path, *required_for_install)?;
     }
 
+    // Copy additional directories needed for installation
     for (relative_path, required_for_install) in ADDITIONAL_DIRECTORIES.as_slice() {
         let path = relative_path.to_anchored_system_path_buf();
         prune.copy_directory(&path, *required_for_install)?;
     }
 
+    // Copy turbo.json config file
     prune.copy_turbo_json(&workspace_names)?;
 
+    // Handle patches in package.json if they exist
     let original_patches = prune
         .package_graph
         .lockfile()
@@ -199,6 +217,7 @@ pub async fn prune(
             original_patches,
             pruned_patches
         );
+        // Generate pruned package.json with only required patches
         let pruned_json = prune
             .package_graph
             .package_manager()
@@ -207,6 +226,7 @@ pub async fn prune(
         // Add trailing newline to match Go behavior
         pruned_json_contents.push('\n');
 
+        // Copy pruned package.json with original permissions
         let original = prune.root.resolve(package_json());
         let permissions = original.symlink_metadata()?.permissions();
         let new_package_json_path = prune.full_directory.resolve(package_json());
@@ -224,6 +244,7 @@ pub async fn prune(
             )?;
         }
 
+        // Copy patch files if needed for docker
         for patch in pruned_patches {
             prune.copy_file(
                 &patch.to_anchored_system_path_buf(),
@@ -231,6 +252,7 @@ pub async fn prune(
             )?;
         }
     } else {
+        // If no patches, just copy package.json as-is
         prune.copy_file(package_json(), Some(CopyDestination::Docker))?;
     }
 
@@ -389,19 +411,46 @@ impl<'a> Prune<'a> {
         }
         Ok(())
     }
-
+    /// Copies a workspace directory and its contents to the pruned output
+    /// location
+    ///
+    /// # Arguments
+    /// * `package_json_path` - Path to the workspace's package.json file
+    ///
+    /// # Returns
+    /// * `Result<(), Error>` - Success or error during copy
+    ///
+    /// # Details
+    /// 1. Resolves the workspace directory path from package.json location
+    /// 2. Copies entire workspace directory tree to pruned output, preserving
+    ///    permissions
+    /// 3. If docker mode enabled, copies just package.json to docker output dir
     fn copy_workspace(&self, package_json_path: &AnchoredSystemPath) -> Result<(), Error> {
+        // Get absolute path to package.json
         let package_json_path = self.root.resolve(package_json_path);
+
+        // Get parent directory of package.json (the workspace directory)
+        // Error if workspace is at filesystem root
         let original_dir = package_json_path
             .parent()
             .ok_or_else(|| Error::WorkspaceAtFilesystemRoot)?;
+
+        // Get metadata (permissions etc) of original workspace directory
         let metadata = original_dir.symlink_metadata()?;
+
+        // Get workspace path relative to repo root
         let relative_workspace_dir = AnchoredSystemPathBuf::new(&self.root, original_dir)?;
+
+        // Resolve target directory in pruned output
         let target_dir = self.full_directory.resolve(&relative_workspace_dir);
+
+        // Create target directory with same permissions as original
         target_dir.create_dir_all_with_permissions(metadata.permissions())?;
 
+        // Copy entire workspace directory tree to pruned output
         turborepo_fs::recursive_copy(original_dir, &target_dir)?;
 
+        // If docker mode enabled, copy just package.json to docker output
         if self.docker {
             let docker_workspace_dir = self.docker_directory().resolve(&relative_workspace_dir);
             docker_workspace_dir.ensure_dir()?;
